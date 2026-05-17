@@ -5,11 +5,22 @@
 #   - game-simhub  (default; SimHub launched alongside RSF launcher)
 #   - game-only    (--rbr-no-simhub flag in args)
 #   - installer    (any *Installer*.exe in args)
-# Log: /tmp/runrbr_simhub.log (truncated each launch).
+#
+# Verbose logging is OFF by default. To debug a launch, flip ENABLE_LOG=1
+# below; output is then truncated and rewritten to LOG_FILE each launch.
+# When OFF, the wrapper's own status lines go to its caller's stdout/stderr
+# (Lutris game log / terminal), and SimHub's output is discarded.
 
-LOG="/tmp/runrbr_simhub.log"
-: > "$LOG"
-exec >>"$LOG" 2>&1
+ENABLE_LOG=0
+LOG_FILE="/tmp/richard-wrapper.log"
+
+if [ "$ENABLE_LOG" = "1" ]; then
+    LOG="$LOG_FILE"
+    : > "$LOG"
+    exec >>"$LOG" 2>&1
+else
+    LOG=/dev/null
+fi
 echo "=========================================="
 echo "[$(date '+%F %T')] wrapper invoked"
 echo "  argv0           : $0"

@@ -173,6 +173,17 @@ Lutris always exports these for wine games; the wrapper relies on them:
 
 ## Log
 
-All wrapper output goes to `/tmp/runrbr_simhub.log` (truncated each launch).
-Useful lines to grep for: `detected mode :`, `rally process detected alive`,
-`cleanup() done`.
+Verbose logging is **off by default**. With logging off, the wrapper's
+status lines go to its caller's stdout (Lutris game log / your terminal)
+and SimHub's stdout is discarded.
+
+To debug a launch, edit `richard-wrapper` and flip the flag near the top:
+
+```bash
+ENABLE_LOG=1
+LOG_FILE="/tmp/richard-wrapper.log"
+```
+
+With logging on, all wrapper + SimHub output is captured to `$LOG_FILE`
+(truncated each launch). Useful lines to grep for: `detected mode :`,
+`rally process detected alive`, `cleanup() done`.
