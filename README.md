@@ -90,6 +90,64 @@ Useful env knobs:
 - `WINEPREFIX=/path/to/other/prefix ./install-simhub.sh` — install into a
   non-default prefix.
 
+## Using the wrapper without Lutris
+
+The wrapper is a standalone bash script. It takes your launch command as
+its args, spawns it, starts SimHub alongside, watches the game/launcher,
+then force-kills the subtree on exit. Nothing in it requires Lutris — you
+just need to export the right env.
+
+Required env:
+
+- `WINEPREFIX` — wine prefix containing RBR (and SimHub, for `game-simhub`
+  mode). The wrapper exits with an error if it's unset.
+- `WINE` — optional; the wine binary used to launch SimHub. Falls back to
+  `wine` on `$PATH`.
+
+Examples:
+
+```bash
+# Plain wine
+WINEPREFIX=~/.wine-rbr WINE=wine \
+  ~/richard-wrapper/richard-wrapper wine \
+  "$WINEPREFIX/drive_c/Richard Burns Rally/rsf_launcher/RSF_Launcher.exe"
+
+# umu-run / proton (mirrors what the Lutris YAML does)
+WINEPREFIX=~/Games/richard-burns-rally WINE=/usr/bin/umu-run \
+  ~/richard-wrapper/richard-wrapper /usr/bin/umu-run \
+  "$WINEPREFIX/drive_c/Richard Burns Rally/rsf_launcher/RSF_Launcher.exe"
+
+# Game-only (skip SimHub)
+WINEPREFIX=~/Games/richard-burns-rally \
+  ~/richard-wrapper/richard-wrapper --rbr-no-simhub /usr/bin/umu-run \
+  "$WINEPREFIX/drive_c/Richard Burns Rally/rsf_launcher/RSF_Launcher.exe"
+```
+
+`install-simhub.sh` honours the same `WINEPREFIX` / `WINE` env, so it
+will drop SimHub into whatever prefix you point it at.
+
+## Adding the wrapper to an existing Lutris install
+
+If you already have RBR installed in Lutris and don't want to reinstall
+from the YAML:
+
+1. Clone the repo into `~/richard-wrapper` as in [Install](#install).
+2. In Lutris → right-click your RBR entry → *Configure* → *System options*
+   → set **Command prefix** to the absolute path of the wrapper, e.g.:
+
+   ```
+   /home/<you>/richard-wrapper/richard-wrapper
+   ```
+
+   Save. (Or edit `~/.local/share/lutris/games/<slug>.yml` directly and
+   set `system: prefix_command: ...`.)
+
+The default `game-simhub` mode works immediately. The two extra launch
+entries (*Game only (no SimHub)*, *RSF Installer*) come from the YAML's
+`launch_configs:` block and don't appear automatically on existing
+installs — to add them, copy that block from this project's
+`richard-burns-rally.yml` into your live game YAML.
+
 ## Launch modes
 
 The wrapper detects mode from its `$@`:
