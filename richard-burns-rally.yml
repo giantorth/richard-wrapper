@@ -1,0 +1,56 @@
+name: Richard Burns Rally
+game_slug: richard-burns-rally
+version: RSF (rallysimfans) RBR + SimHub wrapper
+slug: richard-burns-rally-rsf-rallysimfans-rbr
+runner: wine
+
+# This installer assumes the richard-wrapper project lives at
+# $HOME/richard-wrapper/ (as cloned from
+# https://github.com/giantorth/richard-wrapper). The richard-wrapper
+# script in that folder is referenced directly by system.prefix_command
+# — no copy, no embedded duplicate. If you put the project elsewhere,
+# edit prefix_command at the bottom of this file before installing (or
+# update the live game config at ~/.local/share/lutris/games/<slug>.yml
+# afterward).
+
+script:
+  game:
+    exe: drive_c/Richard Burns Rally/rsf_launcher/RSF_Launcher.exe
+    prefix: $GAMEDIR
+    arch: win64
+    launch_configs:
+      - name: "Game only (no SimHub)"
+        exe: drive_c/Richard Burns Rally/rsf_launcher/RSF_Launcher.exe
+        args: --rbr-no-simhub
+      - name: "RSF Installer"
+        exe: Rallysimfans_Installer.exe
+
+  files:
+    - installer_file:
+        filename: Rallysimfans_Installer.exe
+        url: https://rallysimfans.hu/rbr/downloads/Rallysimfans_Installer/Rallysimfans_Installer.exe?a9f2757c3ba9a6bc8b9abfa0e514cf12
+
+  installer:
+    - task:
+        name: create_prefix
+        prefix: $GAMEDIR
+        arch: win64
+
+    - task:
+        name: wineexec
+        executable: installer_file
+        prefix: $GAMEDIR
+
+  system:
+    prefix_command: $HOME/richard-wrapper/richard-wrapper
+
+  wine:
+    overrides:
+      dinput8.dll: n,b
+      mfc70: n
+      mfc71: n
+      msvci70: n
+      msvcp70: n
+      msvcp71: n
+      msvcr70: n
+      msvcr71: n

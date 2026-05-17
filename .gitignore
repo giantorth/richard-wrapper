@@ -1,0 +1,12 @@
+# Editor / OS
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Runtime artifacts (wrapper log lives in /tmp, but be defensive)
+*.log
+
+# Local-only overrides
+.env
+.env.*

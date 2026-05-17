@@ -1,0 +1,230 @@
+#!/bin/bash
+# Lutris launch wrapper for Richard Burns Rally. Referenced directly by
+# richard-burns-rally.yml via system.prefix_command — not copied.
+# Modes (auto-detected from "$@"):
+#   - game-simhub  (default; SimHub launched alongside RSF launcher)
+#   - game-only    (--rbr-no-simhub flag in args)
+#   - installer    (any *Installer*.exe in args)
+# Log: /tmp/runrbr_simhub.log (truncated each launch).
+
+LOG="/tmp/runrbr_simhub.log"
+: > "$LOG"
+exec >>"$LOG" 2>&1
+echo "=========================================="
+echo "[$(date '+%F %T')] wrapper invoked"
+echo "  argv0           : $0"
+echo "  argc            : $#"
+for a in "$@"; do echo "  arg             : $a"; done
+echo "  WINEPREFIX (env): ${WINEPREFIX:-<unset>}"
+echo "  WINE (env)      : ${WINE:-<unset>}"
+
+MODE="game-simhub"
+FILTERED_ARGS=()
+for a in "$@"; do
+    case "$a" in
+        --rbr-no-simhub)
+            [ "$MODE" = "game-simhub" ] && MODE="game-only"
+            continue ;;
+        *Installer*.exe|*Installer*.EXE|*installer*.exe)
+            MODE="installer" ;;
+    esac
+    FILTERED_ARGS+=("$a")
+done
+echo "  detected mode   : $MODE"
+echo "  forwarded args  : ${FILTERED_ARGS[*]}"
+
+if [ -z "$WINEPREFIX" ]; then
+    echo "[$(date '+%F %T')] ERROR: WINEPREFIX is not set; Lutris should set this." >&2
+    exit 1
+fi
+PREFIX="$WINEPREFIX"
+SIMHUB_EXE="$PREFIX/drive_c/Program Files (x86)/SimHub/SimHubWPF.exe"
+# Lutris always exports $WINE for wine-runner games; fall back to PATH if not.
+WINE_BIN="${WINE:-wine}"
+
+# /proc/<pid>/comm is truncated to 15 chars; wine sometimes lowercases.
+GAME_COMM="RichardBurnsRal"
+LAUNCHER_COMM="RSF_Launcher.ex"
+SIMHUB_COMM="SimHubWPF.exe"
+INSTALLER_COMM="Rallysimfans_In"
+
+SIMHUB_START_DELAY="${SIMHUB_START_DELAY:-5}"
+POLL_INTERVAL="${POLL_INTERVAL:-3}"
+GRACE_AFTER_GAME="${GRACE_AFTER_GAME:-8}"
+HEARTBEAT_INTERVAL=30
+
+game_alive()      { pgrep -ix "$GAME_COMM" >/dev/null 2>&1 || pgrep -f 'RichardBurnsRally_SSE\.exe' >/dev/null 2>&1; }
+launcher_alive()  { pgrep -ix "$LAUNCHER_COMM" >/dev/null 2>&1 || pgrep -f 'RSF_Launcher\.exe' >/dev/null 2>&1; }
+installer_alive() { pgrep -ix "$INSTALLER_COMM" >/dev/null 2>&1 || pgrep -f -i 'Installer\.exe' >/dev/null 2>&1; }
+
+collect_subtree() {
+    local root="$1"; [ -n "$root" ] || return 0; local kid
+    for kid in $(pgrep -P "$root" 2>/dev/null); do collect_subtree "$kid"; done
+    echo "$root"
+}
+
+kill_tree() {
+    local root="$1"; [ -n "$root" ] || return 0; local kid
+    for kid in $(pgrep -P "$root" 2>/dev/null); do kill_tree "$kid"; done
+    if kill -0 "$root" 2>/dev/null; then
+        local comm; comm=$(cat "/proc/$root/comm" 2>/dev/null)
+        echo "  kill -9 pid=$root ($comm)"
+        kill -9 "$root" 2>/dev/null
+    fi
+}
+
+kill_by_comm() {
+    local name="$1" pid comm
+    for pid in $(pgrep -ix "$name" 2>/dev/null); do
+        comm=$(cat "/proc/$pid/comm" 2>/dev/null)
+        echo "  kill -9 pid=$pid ($comm)"
+        kill -9 "$pid" 2>/dev/null
+    done
+}
+
+stale_cleanup() {
+    local found=0 pid c cmdline
+    for comm in "$GAME_COMM" "$LAUNCHER_COMM" "$SIMHUB_COMM" "$INSTALLER_COMM"; do
+        for pid in $(pgrep -ix "$comm" 2>/dev/null); do
+            if [ "$found" -eq 0 ]; then
+                echo "[$(date '+%F %T')] stale processes detected, cleaning up before launch:"
+                found=1
+            fi
+            c=$(cat "/proc/$pid/comm" 2>/dev/null)
+            echo "  kill -9 stale pid=$pid ($c)"
+            kill -9 "$pid" 2>/dev/null
+        done
+    done
+    for pid in $(pgrep -f 'python.*umu-run.*\(RSF_Launcher\|Rallysimfans\)' 2>/dev/null); do
+        if [ "$pid" = "$$" ] || [ "$pid" = "$BASHPID" ]; then continue; fi
+        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+        case "$cmdline" in
+            *richard-wrapper*|*wrapper.sh*|*runrbr_simhub.sh*) continue ;;
+        esac
+        if [ "$found" -eq 0 ]; then
+            echo "[$(date '+%F %T')] stale umu-run for RBR found:"
+            found=1
+        fi
+        c=$(cat "/proc/$pid/comm" 2>/dev/null)
+        echo "  kill_tree stale umu-run pid=$pid ($c)"
+        kill_tree "$pid"
+    done
+    [ "$found" -eq 1 ] && sleep 1
+}
+
+list_our_processes() {
+    local p comm
+    if [ -n "$GAME_PID" ] && kill -0 "$GAME_PID" 2>/dev/null; then
+        for p in $(collect_subtree "$GAME_PID"); do
+            comm=$(cat "/proc/$p/comm" 2>/dev/null)
+            printf '  %s %s [umu subtree]\n' "$p" "$comm"
+        done
+    fi
+    for p in $(pgrep -x "$SIMHUB_COMM" 2>/dev/null); do
+        comm=$(cat "/proc/$p/comm" 2>/dev/null)
+        printf '  %s %s [SimHub]\n' "$p" "$comm"
+    done
+    for p in $(pgrep -x "$GAME_COMM" 2>/dev/null; pgrep -x "$LAUNCHER_COMM" 2>/dev/null); do
+        comm=$(cat "/proc/$p/comm" 2>/dev/null)
+        printf '  %s %s [orphan]\n' "$p" "$comm"
+    done
+}
+
+cleanup() {
+    local rc=$?
+    echo "[$(date '+%F %T')] cleanup() entered (rc=$rc, mode=$MODE, GAME_PID=$GAME_PID)"
+    echo "[$(date '+%F %T')] our processes before cleanup:"
+    list_our_processes
+    if [ -n "$GAME_PID" ]; then
+        echo "[$(date '+%F %T')] kill_tree $GAME_PID:"
+        kill_tree "$GAME_PID"
+    fi
+    echo "[$(date '+%F %T')] killing SimHub by comm:"
+    kill_by_comm "$SIMHUB_COMM"
+    sleep 1
+    echo "[$(date '+%F %T')] fallback pkills:"
+    local name
+    for name in "$LAUNCHER_COMM" "$GAME_COMM" "$INSTALLER_COMM" \
+                "explorer.exe" "conhost.exe" "rpcss.exe" "plugplay.exe" \
+                "svchost.exe" "services.exe" "start.exe" "tabtip.exe" \
+                "winedevice.exe" "wineserver"; do
+        kill_by_comm "$name"
+    done
+    sleep 1
+    echo "[$(date '+%F %T')] survivors after cleanup:"
+    list_our_processes
+    echo "[$(date '+%F %T')] cleanup() done"
+}
+trap cleanup EXIT
+trap 'echo "[$(date '"'"'+%F %T'"'"')] received SIGTERM/SIGINT"; exit 0' TERM INT
+
+stale_cleanup
+
+"${FILTERED_ARGS[@]}" &
+GAME_PID=$!
+echo "[$(date '+%F %T')] launched host pid=$GAME_PID: ${FILTERED_ARGS[*]}"
+
+if [ "$MODE" = "game-simhub" ]; then
+    (
+        sleep "$SIMHUB_START_DELAY"
+        if [ -f "$SIMHUB_EXE" ]; then
+            echo "[$(date '+%F %T')] starting SimHub: $WINE_BIN $SIMHUB_EXE"
+            "$WINE_BIN" "$SIMHUB_EXE" >>"$LOG" 2>&1 &
+            echo "[$(date '+%F %T')] SimHub launched pid=$!"
+        else
+            echo "[$(date '+%F %T')] SimHub not found at: $SIMHUB_EXE"
+        fi
+    ) &
+else
+    echo "[$(date '+%F %T')] mode=$MODE — skipping SimHub launch"
+fi
+
+game_seen=0; launcher_seen=0; installer_seen=0; heartbeat=0
+while true; do
+    if ! kill -0 "$GAME_PID" 2>/dev/null; then
+        echo "[$(date '+%F %T')] umu-run pid=$GAME_PID exited on its own"
+        break
+    fi
+    case "$MODE" in
+        installer)
+            if installer_alive; then
+                [ "$installer_seen" -eq 0 ] && echo "[$(date '+%F %T')] installer process detected — running"
+                installer_seen=1
+            elif [ "$installer_seen" -eq 1 ]; then
+                echo "[$(date '+%F %T')] installer process gone — cleanup"
+                sleep "$GRACE_AFTER_GAME"; break
+            fi
+            ;;
+        game-only|game-simhub)
+            if game_alive; then
+                [ "$game_seen" -eq 0 ] && echo "[$(date '+%F %T')] rally process detected alive — session started"
+                game_seen=1
+            elif [ "$game_seen" -eq 1 ]; then
+                echo "[$(date '+%F %T')] rally process no longer alive — session ended"
+                echo "[$(date '+%F %T')] grace ${GRACE_AFTER_GAME}s before forcing cleanup..."
+                sleep "$GRACE_AFTER_GAME"
+                if ! kill -0 "$GAME_PID" 2>/dev/null; then
+                    echo "[$(date '+%F %T')] umu-run cleaned up on its own during grace"
+                else
+                    echo "[$(date '+%F %T')] umu-run still alive after grace — forcing cleanup"
+                fi
+                break
+            fi
+            if launcher_alive; then
+                launcher_seen=1
+            elif [ "$launcher_seen" -eq 1 ] && [ "$game_seen" -eq 0 ]; then
+                echo "[$(date '+%F %T')] launcher closed without a rally — cleaning up"
+                sleep "$GRACE_AFTER_GAME"; break
+            fi
+            ;;
+    esac
+
+    heartbeat=$((heartbeat + POLL_INTERVAL))
+    if [ "$heartbeat" -ge "$HEARTBEAT_INTERVAL" ]; then
+        echo "[$(date '+%F %T')] heartbeat: mode=$MODE game_seen=$game_seen launcher_seen=$launcher_seen installer_seen=$installer_seen, our processes:"
+        list_our_processes
+        heartbeat=0
+    fi
+    sleep "$POLL_INTERVAL"
+done
+exit 0
