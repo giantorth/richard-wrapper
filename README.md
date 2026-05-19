@@ -1,10 +1,8 @@
 # richard-wrapper
 
-Lutris launch wrapper + installer for Richard Burns Rally (RSF) with SimHub
+Lutris launch wrapper + installer for Richard Burns Rally (RSF) with optional SimHub
 auto-launch and a force-cleanup on exit to work around RBR's well-known
 "wineserver / proton `waitforexitandrun` hangs forever" shutdown behaviour.
-
-Project home: <https://github.com/giantorth/richard-wrapper>
 
 ## Files
 
