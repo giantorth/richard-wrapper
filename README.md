@@ -1,4 +1,4 @@
-# richard-wrapper
+# Richard Wrapper
 
 Lutris launch wrapper + installer for Richard Burns Rally (RSF) with optional SimHub
 auto-launch and a force-cleanup on exit to work around RBR's well-known
