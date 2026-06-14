@@ -94,8 +94,11 @@ kill_by_comm() {
 }
 
 stale_cleanup() {
-    local found=0 pid c cmdline
-    for comm in "$GAME_COMM" "$LAUNCHER_COMM" "$SIMHUB_COMM" "$INSTALLER_COMM"; do
+    local found=0 pid c cmdline stale_comms
+    stale_comms=("$GAME_COMM" "$LAUNCHER_COMM" "$INSTALLER_COMM")
+    # Only sweep a stale SimHub when we're the ones managing it.
+    [ "$MODE" = "game-simhub" ] && stale_comms+=("$SIMHUB_COMM")
+    for comm in "${stale_comms[@]}"; do
         for pid in $(pgrep -ix "$comm" 2>/dev/null); do
             if [ "$found" -eq 0 ]; then
                 echo "[$(date '+%F %T')] stale processes detected, cleaning up before launch:"
@@ -150,9 +153,13 @@ cleanup() {
         echo "[$(date '+%F %T')] kill_tree $GAME_PID:"
         kill_tree "$GAME_PID"
     fi
-    echo "[$(date '+%F %T')] killing SimHub by comm:"
-    kill_by_comm "$SIMHUB_COMM"
-    sleep 1
+    if [ "$MODE" = "game-simhub" ]; then
+        echo "[$(date '+%F %T')] killing SimHub by comm:"
+        kill_by_comm "$SIMHUB_COMM"
+        sleep 1
+    else
+        echo "[$(date '+%F %T')] mode=$MODE — leaving SimHub alone"
+    fi
     echo "[$(date '+%F %T')] fallback pkills:"
     local name
     for name in "$LAUNCHER_COMM" "$GAME_COMM" "$INSTALLER_COMM" \
