@@ -74,14 +74,42 @@ LAUNCHER_COMM="RSF_Launcher.ex"
 SIMHUB_COMM="SimHubWPF.exe"
 INSTALLER_COMM="Rallysimfans_In"
 
+# Settle time after the launcher shows up, not a blind delay from launch — see
+# the SimHub starter below.
 SIMHUB_START_DELAY="${SIMHUB_START_DELAY:-5}"
+# How long to wait for the launcher before starting SimHub anyway.
+SIMHUB_WAIT_MAX="${SIMHUB_WAIT_MAX:-90}"
+# How long to let the prefix drain after a polite TERM before forcing it, and
+# how long to wait for a torn-down prefix to go quiet before launching into it.
+PREFIX_TERM_WAIT="${PREFIX_TERM_WAIT:-8}"
+PREFIX_CLEAR_TIMEOUT="${PREFIX_CLEAR_TIMEOUT:-20}"
 POLL_INTERVAL="${POLL_INTERVAL:-3}"
 GRACE_AFTER_GAME="${GRACE_AFTER_GAME:-3}"
 HEARTBEAT_INTERVAL=30
 
-game_alive()      { pgrep -ix "$GAME_COMM" >/dev/null 2>&1 || pgrep -f 'RichardBurnsRally_SSE\.exe' >/dev/null 2>&1; }
-launcher_alive()  { pgrep -ix "$LAUNCHER_COMM" >/dev/null 2>&1 || pgrep -f 'RSF_Launcher\.exe' >/dev/null 2>&1; }
-installer_alive() { pgrep -ix "$INSTALLER_COMM" >/dev/null 2>&1 || pgrep -f -i 'Installer\.exe' >/dev/null 2>&1; }
+# A command-line match is only evidence if the match isn't us: the wrapper's own
+# argv carries the exe path Lutris handed it, and so does every subshell we fork.
+external_f() {
+    local pat="$1" pid cmdline
+    for pid in $(pgrep -f "$pat" 2>/dev/null); do
+        case "$SELF_CHAIN" in *" $pid "*) continue ;; esac
+        cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+        case "$cmdline" in
+            *richard-wrapper*|*wrapper.sh*|*runrbr_simhub.sh*) continue ;;
+        esac
+        return 0
+    done
+    return 1
+}
+
+# Match on comm (truncated to 15 chars, and wine sometimes lowercases it, hence
+# the case-insensitive prefix). No command-line fallback for the launcher or the
+# installer: Lutris puts those paths in our own argv, and the umu-run/proton
+# chain carries them too from the moment we start — both would read "alive"
+# before wine has done anything, which is exactly when we must not act.
+game_alive()      { pgrep -i "^${GAME_COMM}" >/dev/null 2>&1 || external_f 'RichardBurnsRally_SSE\.exe'; }
+launcher_alive()  { pgrep -i "^RSF_Launcher" >/dev/null 2>&1; }
+installer_alive() { pgrep -i "^Rallysimfans" >/dev/null 2>&1; }
 
 collect_subtree() {
     local root="$1"; [ -n "$root" ] || return 0; local kid
@@ -193,6 +221,29 @@ sweep_prefix() {
     done
 }
 
+# Wait for the prefix to go quiet. A wineserver that was just killed takes a
+# moment to go, and a session that attaches to one mid-teardown comes up broken
+# — proton's prefix setup fails and the RSF launcher window never appears. So
+# never launch into a prefix that still has processes in it.
+wait_prefix_clear() {
+    local timeout="${1:-$PREFIX_CLEAR_TIMEOUT}" waited=0 pids pid
+    while :; do
+        pids=$(prefix_pids)
+        if [ -z "$pids" ]; then
+            [ "$waited" -gt 0 ] && echo "[$(date '+%F %T')] prefix quiet after ${waited}s"
+            return 0
+        fi
+        [ "$waited" -ge "$timeout" ] && break
+        sleep 1
+        waited=$((waited + 1))
+    done
+    echo "[$(date '+%F %T')] prefix still busy after ${timeout}s:"
+    for pid in $pids; do
+        echo "  $pid $(cat "/proc/$pid/comm" 2>/dev/null)"
+    done
+    return 1
+}
+
 stale_cleanup() {
     local found=0 pid c cmdline stale_comms
     stale_comms=("$GAME_COMM" "$LAUNCHER_COMM" "$INSTALLER_COMM")
@@ -223,19 +274,26 @@ stale_cleanup() {
         echo "  kill_tree stale umu-run pid=$pid ($c)"
         kill_tree "$pid"
     done
-    # Survivors of an earlier launch still squatting the prefix (their wineserver
-    # is long gone, so they'll never notice their parent died on their own).
-    for pid in $(prefix_pids); do
-        kill -0 "$pid" 2>/dev/null || continue
+    # Whatever is still holding the prefix: survivors of an earlier launch (their
+    # wineserver is long gone, so they'll never notice their parent died), a
+    # SimHub we're about to replace, and everything killed above. TERM first —
+    # a wineserver that exits cleanly tears its socket down properly, which is
+    # what lets the next session start on a clean slate.
+    if [ -n "$(prefix_pids)" ]; then
         if [ "$found" -eq 0 ]; then
-            echo "[$(date '+%F %T')] stale processes still holding $PREFIX:"
+            echo "[$(date '+%F %T')] processes still holding $PREFIX:"
             found=1
         fi
-        c=$(cat "/proc/$pid/comm" 2>/dev/null)
-        echo "  kill -9 stale prefix pid=$pid ($c)"
-        kill -9 "$pid" 2>/dev/null
-    done
+        sweep_prefix TERM
+        if ! wait_prefix_clear "$PREFIX_TERM_WAIT"; then
+            echo "[$(date '+%F %T')] forcing the stragglers out:"
+            sweep_prefix 9
+            wait_prefix_clear "$PREFIX_CLEAR_TIMEOUT" ||
+                echo "[$(date '+%F %T')] WARNING: launching into a prefix that is not clear"
+        fi
+    fi
     [ "$found" -eq 1 ] && sleep 1
+    return 0
 }
 
 list_our_processes() {
@@ -300,6 +358,7 @@ cleanup() {
         echo "[$(date '+%F %T')] removing winehub handoff: $HANDOFF_FILE"
         rm -f "$HANDOFF_FILE"
     fi
+    wait_prefix_clear 5 >/dev/null || true
     echo "[$(date '+%F %T')] survivors after cleanup:"
     list_our_processes
     echo "[$(date '+%F %T')] cleanup() done"
@@ -323,6 +382,29 @@ echo "[$(date '+%F %T')] launched host pid=$GAME_PID: ${FILTERED_ARGS[*]}"
 
 if [ "$MODE" = "game-simhub" ]; then
     (
+        # Wait for the game's wine session to come up before adding a second one.
+        # On a blind timer this lands mid-prefix-setup (worst after we just tore
+        # down a running SimHub, which makes proton's setup take longer) and the
+        # RSF launcher never appears.
+        waited=0; seen=0
+        while [ "$seen" -eq 0 ]; do
+            if launcher_alive || game_alive; then
+                seen=1
+                echo "[$(date '+%F %T')] launcher up after ${waited}s"
+                break
+            fi
+            if ! kill -0 "$GAME_PID" 2>/dev/null; then
+                echo "[$(date '+%F %T')] host process gone before the launcher appeared — not starting SimHub"
+                exit 0
+            fi
+            if [ "$waited" -ge "$SIMHUB_WAIT_MAX" ]; then
+                echo "[$(date '+%F %T')] launcher not seen after ${waited}s — starting SimHub anyway"
+                break
+            fi
+            sleep 1
+            waited=$((waited + 1))
+        done
+        echo "[$(date '+%F %T')] settling ${SIMHUB_START_DELAY}s before starting SimHub"
         sleep "$SIMHUB_START_DELAY"
         if [ -f "$SIMHUB_EXE" ]; then
             echo "[$(date '+%F %T')] starting SimHub: $WINE_BIN $SIMHUB_EXE"
@@ -370,8 +452,14 @@ while true; do
             if launcher_alive; then
                 launcher_seen=1
             elif [ "$launcher_seen" -eq 1 ] && [ "$game_seen" -eq 0 ]; then
-                echo "[$(date '+%F %T')] launcher closed without a rally — cleaning up"
-                sleep "$GRACE_AFTER_GAME"; break
+                echo "[$(date '+%F %T')] launcher gone without a rally — ${GRACE_AFTER_GAME}s to be sure"
+                sleep "$GRACE_AFTER_GAME"
+                if launcher_alive || game_alive; then
+                    echo "[$(date '+%F %T')] launcher/game back — carrying on"
+                    continue
+                fi
+                echo "[$(date '+%F %T')] launcher still gone — cleaning up"
+                break
             fi
             ;;
     esac
