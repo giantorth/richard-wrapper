@@ -49,9 +49,24 @@ if [ -z "$WINEPREFIX" ]; then
     exit 1
 fi
 PREFIX="$WINEPREFIX"
+PREFIX_REAL="$(readlink -f "$PREFIX" 2>/dev/null || printf '%s' "$PREFIX")"
 SIMHUB_EXE="$PREFIX/drive_c/Program Files (x86)/SimHub/SimHubWPF.exe"
 # Lutris always exports $WINE for wine-runner games; fall back to PATH if not.
 WINE_BIN="${WINE:-wine}"
+
+# winehub handoff: a separately-running winehub (in the SimHub prefix) can't see
+# our install dir through umu's pressure-vessel, so hand it the RBR path via a
+# file it reads at detection. Keyed by the game exe winehub matches on.
+HANDOFF_DIR="${XDG_RUNTIME_DIR:-/tmp}/winehub"
+HANDOFF_FILE="$HANDOFF_DIR/RichardBurnsRally_SSE.exe"
+RBR_INSTALL_DIR=""
+for a in "${FILTERED_ARGS[@]}"; do
+    case "$a" in *.exe) RBR_INSTALL_DIR="$(dirname "$a")" ;; esac
+done
+# The launcher lives in <RBR>/rsf_launcher/; the game exe lives in <RBR>/.
+if [ "$(basename "$RBR_INSTALL_DIR")" = "rsf_launcher" ]; then
+    RBR_INSTALL_DIR="$(dirname "$RBR_INSTALL_DIR")"
+fi
 
 # /proc/<pid>/comm is truncated to 15 chars; wine sometimes lowercases.
 GAME_COMM="RichardBurnsRal"
@@ -61,7 +76,7 @@ INSTALLER_COMM="Rallysimfans_In"
 
 SIMHUB_START_DELAY="${SIMHUB_START_DELAY:-5}"
 POLL_INTERVAL="${POLL_INTERVAL:-3}"
-GRACE_AFTER_GAME="${GRACE_AFTER_GAME:-8}"
+GRACE_AFTER_GAME="${GRACE_AFTER_GAME:-3}"
 HEARTBEAT_INTERVAL=30
 
 game_alive()      { pgrep -ix "$GAME_COMM" >/dev/null 2>&1 || pgrep -f 'RichardBurnsRally_SSE\.exe' >/dev/null 2>&1; }
@@ -90,6 +105,91 @@ kill_by_comm() {
         comm=$(cat "/proc/$pid/comm" 2>/dev/null)
         echo "  kill -9 pid=$pid ($comm)"
         kill -9 "$pid" 2>/dev/null
+    done
+}
+
+# This script plus everything above it (lutris-wrapper, Lutris). They can carry
+# WINEPREFIX in their environment too, so the prefix sweep must never touch them.
+self_chain() {
+    local pid=$$ ppid
+    while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+        printf '%s ' "$pid"
+        ppid=$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null)
+        [ "$ppid" = "$pid" ] && break
+        pid="$ppid"
+    done
+}
+SELF_CHAIN=" $(self_chain) "
+
+prefix_match() {
+    local val="${1%/}"
+    [ "$val" = "${PREFIX%/}" ] && return 0
+    [ "$(readlink -f "$val" 2>/dev/null)" = "$PREFIX_REAL" ]
+}
+
+# SimHubWPF.exe itself and the helpers its plugins spawn (e.g. the MOZA
+# CoapStub under <SimHub>/MozaPlugin/CoapStub/). Used to spare them in the
+# modes where we didn't start SimHub.
+simhub_owned() {
+    case "$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null)" in
+        *[Ss]im[Hh]ub*) return 0 ;;
+    esac
+    return 1
+}
+
+# Every process whose environment still points at our prefix. The game and its
+# plugins spawn helpers we can't enumerate by name up front, and any survivor
+# keeps lutris-wrapper (a child subreaper) alive, so the session never ends and
+# the prefix stays dirty. Scoping by WINEPREFIX catches them all. $1 is an extra
+# pid to skip — callers pass their own subshell, which inherited WINEPREFIX too.
+prefix_pids_all() {
+    local skip="$SELF_CHAIN $1 $BASHPID " dir pid kv mine
+    for dir in /proc/[0-9]*; do
+        pid=${dir#/proc/}
+        case "$skip" in *" $pid "*) continue ;; esac
+        [ -r "$dir/environ" ] || continue
+        mine=0
+        {
+            while IFS= read -r -d '' kv; do
+                case "$kv" in
+                    WINEPREFIX=*) prefix_match "${kv#WINEPREFIX=}" && mine=1; break ;;
+                esac
+            done < "$dir/environ"
+        } 2>/dev/null
+        [ "$mine" -eq 1 ] && printf '%s\n' "$pid"
+    done
+}
+
+# In the modes where we didn't start SimHub, spare it and its helpers — but only
+# while a SimHub is actually running in this prefix. Otherwise anything
+# SimHub-shaped in here is an orphan of an earlier session and has to go.
+prefix_pids() {
+    local me=$BASHPID pids pid kid spare=" "
+    # $BASHPID inside $( ) is the inner subshell's, so grab ours up front —
+    # otherwise the scan finds this very subshell (it inherited WINEPREFIX).
+    pids=$(prefix_pids_all "$me")
+    if [ "$MODE" != "game-simhub" ]; then
+        for pid in $pids; do
+            [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = "$SIMHUB_COMM" ] || continue
+            for kid in $(collect_subtree "$pid"); do spare+="$kid "; done
+        done
+    fi
+    for pid in $pids; do
+        if [ "$spare" != " " ]; then
+            case "$spare" in *" $pid "*) continue ;; esac
+            simhub_owned "$pid" && continue
+        fi
+        printf '%s\n' "$pid"
+    done
+}
+
+sweep_prefix() {
+    local sig="$1" pid comm
+    for pid in $(prefix_pids); do
+        kill -0 "$pid" 2>/dev/null || continue
+        comm=$(cat "/proc/$pid/comm" 2>/dev/null)
+        echo "  kill -$sig pid=$pid ($comm) [prefix]"
+        kill "-$sig" "$pid" 2>/dev/null
     done
 }
 
@@ -123,24 +223,41 @@ stale_cleanup() {
         echo "  kill_tree stale umu-run pid=$pid ($c)"
         kill_tree "$pid"
     done
+    # Survivors of an earlier launch still squatting the prefix (their wineserver
+    # is long gone, so they'll never notice their parent died on their own).
+    for pid in $(prefix_pids); do
+        kill -0 "$pid" 2>/dev/null || continue
+        if [ "$found" -eq 0 ]; then
+            echo "[$(date '+%F %T')] stale processes still holding $PREFIX:"
+            found=1
+        fi
+        c=$(cat "/proc/$pid/comm" 2>/dev/null)
+        echo "  kill -9 stale prefix pid=$pid ($c)"
+        kill -9 "$pid" 2>/dev/null
+    done
     [ "$found" -eq 1 ] && sleep 1
 }
 
 list_our_processes() {
-    local p comm
+    local p comm seen=" "
     if [ -n "$GAME_PID" ] && kill -0 "$GAME_PID" 2>/dev/null; then
         for p in $(collect_subtree "$GAME_PID"); do
             comm=$(cat "/proc/$p/comm" 2>/dev/null)
             printf '  %s %s [umu subtree]\n' "$p" "$comm"
+            seen+="$p "
         done
     fi
     for p in $(pgrep -x "$SIMHUB_COMM" 2>/dev/null); do
+        case "$seen" in *" $p "*) continue ;; esac
         comm=$(cat "/proc/$p/comm" 2>/dev/null)
         printf '  %s %s [SimHub]\n' "$p" "$comm"
+        seen+="$p "
     done
-    for p in $(pgrep -x "$GAME_COMM" 2>/dev/null; pgrep -x "$LAUNCHER_COMM" 2>/dev/null); do
+    for p in $(prefix_pids); do
+        case "$seen" in *" $p "*) continue ;; esac
         comm=$(cat "/proc/$p/comm" 2>/dev/null)
-        printf '  %s %s [orphan]\n' "$p" "$comm"
+        printf '  %s %s [prefix]\n' "$p" "$comm"
+        seen+="$p "
     done
 }
 
@@ -160,6 +277,11 @@ cleanup() {
     else
         echo "[$(date '+%F %T')] mode=$MODE — leaving SimHub alone"
     fi
+    # Ask anything left in the prefix to go while wineserver is still up — a
+    # wine process orphaned by a dead wineserver can no longer shut itself down.
+    echo "[$(date '+%F %T')] prefix sweep (TERM):"
+    sweep_prefix TERM
+    sleep 1
     echo "[$(date '+%F %T')] fallback pkills:"
     local name
     for name in "$LAUNCHER_COMM" "$GAME_COMM" "$INSTALLER_COMM" \
@@ -169,6 +291,15 @@ cleanup() {
         kill_by_comm "$name"
     done
     sleep 1
+    # Whatever outlived all of the above — helpers the game's plugins spawned
+    # under names we don't know. Leaving one behind keeps lutris-wrapper alive
+    # and Lutris thinks the game is still running.
+    echo "[$(date '+%F %T')] prefix sweep (KILL):"
+    sweep_prefix 9
+    if [ -n "$HANDOFF_FILE" ] && [ -e "$HANDOFF_FILE" ]; then
+        echo "[$(date '+%F %T')] removing winehub handoff: $HANDOFF_FILE"
+        rm -f "$HANDOFF_FILE"
+    fi
     echo "[$(date '+%F %T')] survivors after cleanup:"
     list_our_processes
     echo "[$(date '+%F %T')] cleanup() done"
@@ -177,6 +308,14 @@ trap cleanup EXIT
 trap 'echo "[$(date '"'"'+%F %T'"'"')] received SIGTERM/SIGINT"; exit 0' TERM INT
 
 stale_cleanup
+
+# Drop the winehub handoff for game launches (not the installer) so a winehub
+# watching the SimHub prefix can mirror RBR's folder + run its detection stub.
+if [ "$MODE" != "installer" ] && [ -n "$RBR_INSTALL_DIR" ]; then
+    mkdir -p "$HANDOFF_DIR"
+    printf '%s\n' "$RBR_INSTALL_DIR" > "$HANDOFF_FILE"
+    echo "[$(date '+%F %T')] winehub handoff: $HANDOFF_FILE -> $RBR_INSTALL_DIR"
+fi
 
 "${FILTERED_ARGS[@]}" &
 GAME_PID=$!
