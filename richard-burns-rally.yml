@@ -28,7 +28,7 @@ script:
   files:
     - installer_file:
         filename: Rallysimfans_Installer.exe
-        url: https://rallysimfans.hu/rbr/downloads/Rallysimfans_Installer/Rallysimfans_Installer.exe?a9f2757c3ba9a6bc8b9abfa0e514cf12
+        url: https://rallysimfans.hu/rbr/downloads/Rallysimfans_Installer/Rallysimfans_Installer.exe?fcc0e26f01cffe5e3679f1ef8e2a5bc7
 
   installer:
     - task:
