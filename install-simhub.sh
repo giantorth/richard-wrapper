@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-SIMHUB_VERSION="${SIMHUB_VERSION:-9.11.11}"
+SIMHUB_VERSION="${SIMHUB_VERSION:-9.12.8}"
 PREFIX="${WINEPREFIX:-$HOME/Games/richard-burns-rally}"
 
 WINE_BIN="${WINE:-}"
