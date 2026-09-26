@@ -107,9 +107,19 @@ external_f() {
 # installer: Lutris puts those paths in our own argv, and the umu-run/proton
 # chain carries them too from the moment we start — both would read "alive"
 # before wine has done anything, which is exactly when we must not act.
-game_alive()      { pgrep -i "^${GAME_COMM}" >/dev/null 2>&1 || external_f 'RichardBurnsRally_SSE\.exe'; }
-launcher_alive()  { pgrep -i "^RSF_Launcher" >/dev/null 2>&1; }
-installer_alive() { pgrep -i "^Rallysimfans" >/dev/null 2>&1; }
+# pgrep also matches zombies. Under plain wine (no umu/pressure-vessel reaper) an
+# exited RBR lingers as <defunct> under lutris-wrapper, which would read as alive
+# forever and the exit sweep would never run — so only count living processes.
+pgrep_live() {
+    local pid
+    for pid in $(pgrep "$@" 2>/dev/null); do
+        [ "$(awk '/^State:/{print $2}' "/proc/$pid/status" 2>/dev/null)" = Z ] || return 0
+    done
+    return 1
+}
+game_alive()      { pgrep_live -i "^${GAME_COMM}" || external_f 'RichardBurnsRally_SSE\.exe'; }
+launcher_alive()  { pgrep_live -i "^RSF_Launcher"; }
+installer_alive() { pgrep_live -i "^Rallysimfans"; }
 
 collect_subtree() {
     local root="$1"; [ -n "$root" ] || return 0; local kid
